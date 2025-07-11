@@ -19,8 +19,7 @@ const std = @import("std");
 
 const Review = struct {
     title: []const u8,
-    score: u8,
-    body: []u8,
+    body: []const u8,
 };
 const Note = []const u8;
 const Element = union(enum) {
@@ -47,22 +46,50 @@ pub fn main() !void {
     };
 
     var blocks = std.ArrayList(Element).init(arena.allocator());
-    var currReview: ?Review = null;
+    var curr_review: ?Review = null;
+    var curr_body = std.ArrayList(u8).init(arena.allocator());
     const file_reader = file.reader();
 
     // iterate over each line
-    while (try file_reader.readUntilDelimiterOrEofAlloc(arena.allocator(), '\n', 65536)) |line| {
-        if (line.len > 2 and std.mem.eql(u8, line[0..2], "--")) {
+    var is_parsing_review = false;
+    while (try file_reader.readUntilDelimiterOrEofAlloc(arena.allocator(), '\n', 65535)) |line| {
+        if (is_parsing_review) {
+            if (line.len == 0) {
+                is_parsing_review = false;
+                curr_review.?.body = (try curr_body.clone()).items;
+                try blocks.append(Element{ .Review = curr_review.? });
+                // printElement(Element{ .Review = curr_review.? });
+                // try waitForInput();
+                continue;
+            }
+            try curr_body.appendSlice(try std.mem.concat(arena.allocator(), u8, &[_][]const u8{ line, "\n" }));
+        } else if (line.len > 3 and std.mem.eql(u8, line[0..3], "-- ")) {
             const note: Note = try arena.allocator().dupe(u8, line);
             try blocks.append(Element{ .Note = note });
         } else if (line.len > 4 and std.mem.eql(u8, line[0..4], "### ")) {
-            currReview = .{
+            is_parsing_review = true;
+            curr_review = .{
                 .title = try arena.allocator().dupe(u8, line[4..]),
-                .score = 0,
                 .body = "",
             };
+            curr_body.clearRetainingCapacity();
         }
     }
 
-    try stdOutWriter.print("\x1b[32mOK:\x1b[0m successfully wrote to game review markdown file.\n", .{});
+    for (blocks.items) |block| {
+        printElement(block);
+    }
+
+    try stdOutWriter.print("\x1b[32mOK:\x1b[0m parse complete.\n", .{});
+}
+
+fn printElement(el: Element) void {
+    if (el == .Review) {
+        std.debug.print("title: {s}\nbody: {s}\n\n", .{ el.Review.title, el.Review.body });
+    }
+}
+
+fn waitForInput() !void {
+    var buf: [65536]u8 = undefined;
+    _ = try std.io.getStdIn().reader().readUntilDelimiter(&buf, '\n');
 }
