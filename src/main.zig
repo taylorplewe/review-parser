@@ -32,39 +32,39 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const stdOutWriter = std.io.getStdOut().writer();
-    const stdErrWriter = std.io.getStdErr().writer();
 
     const args = try std.process.argsAlloc(arena.allocator());
     if (args.len < 2) {
-        try stdErrWriter.print("\x1b[31mERROR: \x1b[0mmust pass filename.\n", .{});
-        std.process.exit(1);
+        printErrorAndExit("must pass filename");
+        unreachable;
     }
+    const in_file_path: []const u8 = args[1];
+    const out_file_path: []const u8 = if (args.len < 3) in_file_path else args[2];
 
-    const file = std.fs.cwd().openFile(args[1], .{}) catch {
-        try stdErrWriter.print("\x1b[31mERROR:\x1b[0m could not find file.", .{});
-        std.process.exit(1);
+    // open file for writing
+    const in_file = std.fs.cwd().openFile(in_file_path, .{}) catch {
+        printErrorAndExit("could not find file");
+        unreachable;
     };
 
     var blocks = std.ArrayList(Element).init(arena.allocator());
     var curr_review: ?Review = null;
     var curr_body = std.ArrayList(u8).init(arena.allocator());
-    const file_reader = file.reader();
+    const in_file_reader = in_file.reader();
 
     // iterate over each line
     var is_parsing_review = false;
-    while (try file_reader.readUntilDelimiterOrEofAlloc(arena.allocator(), '\n', 65535)) |line| {
+    while (try in_file_reader.readUntilDelimiterOrEofAlloc(arena.allocator(), '\n', 65535)) |line| {
         if (is_parsing_review) {
-            if (line.len == 0) {
+            if (line.len == 0 or line[0] == '\r') {
                 is_parsing_review = false;
-                curr_review.?.body = (try curr_body.clone()).items;
+                curr_review.?.body = try curr_body.toOwnedSlice();
                 try blocks.append(Element{ .Review = curr_review.? });
-                // printElement(Element{ .Review = curr_review.? });
-                // try waitForInput();
                 continue;
             }
-            try curr_body.appendSlice(try std.mem.concat(arena.allocator(), u8, &[_][]const u8{ line, "\n" }));
+            try curr_body.appendSlice(strWithNewline(arena.allocator(), line));
         } else if (line.len > 3 and std.mem.eql(u8, line[0..3], "-- ")) {
-            const note: Note = try arena.allocator().dupe(u8, line);
+            const note: Note = strWithNewline(arena.allocator(), line);
             try blocks.append(Element{ .Note = note });
         } else if (line.len > 4 and std.mem.eql(u8, line[0..4], "### ")) {
             is_parsing_review = true;
@@ -72,24 +72,66 @@ pub fn main() !void {
                 .title = try arena.allocator().dupe(u8, line[4..]),
                 .body = "",
             };
-            curr_body.clearRetainingCapacity();
         }
     }
-
-    for (blocks.items) |block| {
-        printElement(block);
+    if (is_parsing_review) {
+        is_parsing_review = false;
+        curr_review.?.body = (try curr_body.clone()).items;
+        try blocks.append(Element{ .Review = curr_review.? });
     }
+    in_file.close();
+
+    // reverse list
+    std.mem.reverse(Element, blocks.items);
+
+    // write new list to file
+    const out_file = std.fs.cwd().createFile(out_file_path, .{ .truncate = true }) catch {
+        printErrorAndExit("could not create or open file for writing");
+        unreachable;
+    };
+    defer out_file.close();
+    try writeToFile(arena.allocator(), blocks.items, out_file);
+
+    // debug
+    // for (blocks.items) |block| {
+    //     printElement(block);
+    // }
 
     try stdOutWriter.print("\x1b[32mOK:\x1b[0m parse complete.\n", .{});
 }
 
+fn printErrorAndExit(msg: []const u8) void {
+    const stdErrWriter = std.io.getStdErr().writer();
+    stdErrWriter.print("\x1b[31mERROR: \x1b[0m{s}.\n", .{msg}) catch unreachable;
+    std.process.exit(1);
+}
+
+fn writeToFile(allocator: std.mem.Allocator, els: []Element, file: std.fs.File) !void {
+    const writer = file.writer();
+    var output = std.ArrayList(u8).init(allocator);
+    for (els) |el| {
+        try output.appendSlice(switch (el) {
+            .Review => try std.fmt.allocPrint(allocator, "### {s}\n{s}\n", .{ el.Review.title, el.Review.body }),
+            .Note => try std.fmt.allocPrint(allocator, "{s}\n", .{el.Note}),
+        });
+    }
+    try file.seekTo(0);
+    _ = try writer.write("In descending chronological order\n\n");
+    _ = try writer.write(output.items);
+}
+
 fn printElement(el: Element) void {
-    if (el == .Review) {
-        std.debug.print("title: {s}\nbody: {s}\n\n", .{ el.Review.title, el.Review.body });
+    switch (el) {
+        .Review => std.debug.print("title: {s}\nbody: {s}\n---\n", .{ el.Review.title, el.Review.body }),
+        .Note => std.debug.print("{s}\n---\n", .{el.Note}),
     }
 }
 
-fn waitForInput() !void {
+fn waitForInput() void {
     var buf: [65536]u8 = undefined;
-    _ = try std.io.getStdIn().reader().readUntilDelimiter(&buf, '\n');
+    _ = std.io.getStdIn().reader().readUntilDelimiter(&buf, '\n') catch unreachable;
+}
+
+fn strWithNewline(allocator: std.mem.Allocator, str: []u8) []u8 {
+    return std.fmt.allocPrint(allocator, "{s}\n", .{str}) catch unreachable;
 }
